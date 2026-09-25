@@ -148,8 +148,10 @@ Store settings
 Emails
 ------
 
-Saleor's built-in email plugins send them through SMTP (`SMTP_*`; `SMTP_SECURE`:
-`tls` = STARTTLS, `ssl` = SMTPS, `none`), from the Celery worker:
+Saleor's built-in email plugins (User emails and Admin emails, not the
+Saleor SMTP App, which is a separate Next.js service) send them through SMTP
+(`SMTP_*`; `SMTP_SECURE`: `tls` = STARTTLS, `ssl` = SMTPS, `none`), from the
+Celery worker:
 
 - **User emails** (customers, per channel): order details, order confirmed,
   fulfillment (shipped), shipping update, payment, cancellation, refund,
@@ -161,9 +163,13 @@ Saleor's built-in email plugins send them through SMTP (`SMTP_*`; `SMTP_SECURE`:
 The stack stores Spanish versions of Saleor's own templates (the image's
 templates with the texts translated by `config/saleor/stack/emails_es.py`)
 and subjects, once; edit them in the dashboard (Configuration > Plugins).
-Saleor formats amounts in emails in English (`CLP19,980`); the stack formats
-them with `SALEOR_EMAIL_LOCALE` (`$19.980`). Without `SMTP_HOST` the
-plugins are off and no email is sent.
+`setup` writes the plugins' configuration and templates with the ORM:
+saving a plugin's configuration through Saleor connects to the SMTP server
+to validate it. Saleor formats amounts in emails with `LANGUAGE_CODE`,
+hard-coded to `en` (`CLP19,980`; babel can't parse Django's `es-cl`); the
+stack formats them with `SALEOR_EMAIL_LOCALE` (`$19.980`). Without
+`SMTP_HOST` the plugins are off and no email is sent. "Mark as paid" sends
+no email (Saleor's behavior).
 
 Storefronts
 -----------
@@ -274,7 +280,10 @@ Every variable is documented in `.env.prod.example`. Main groups:
 Notes:
 
 - Production settings: `DEBUG=False` (Saleor defaults to `True`), usage
-  telemetry off (Saleor sends it by default), GraphQL playground off.
+  telemetry off (Saleor sends it by default), GraphQL playground off. With
+  `DEBUG=False` Saleor requires `ALLOWED_CLIENT_HOSTS`:
+  `scripts/entrypoint.sh` builds it (and `ALLOWED_HOSTS`) from `SALEOR_URL`'s
+  host plus `SALEOR_ALLOWED_CLIENT_HOSTS` (`SALEOR_ALLOWED_HOSTS`).
 - uvicorn trusts `X-Forwarded-For`/`-Proto` from Caddy (the only client of
   the API), so Saleor sees the real client IP and `https://` behind Caddy and
   Traefik.
@@ -328,6 +337,13 @@ What was checked for this stack (2026-09-24):
   install).
 - Not tested: issuing a real Let's Encrypt certificate (needs a public
   domain), payment apps, a storefront, SMTPS/STARTTLS with a real provider.
+
+Testing
+-------
+
+- A checkout through the API with a Chilean address needs `countryArea` and
+  a phone that libphonenumber accepts (`+56961234567` works,
+  `+56912345678` is rejected).
 
 Resource usage
 --------------
