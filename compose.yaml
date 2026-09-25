@@ -1,0 +1,360 @@
+# Saleor stack: Caddy (TLS, media) + Saleor API (official image) + dashboard
+# (official image) + Celery worker and beat + PostgreSQL + Valkey, with a
+# setup job and optional backups and Mailpit.
+#
+# Quick start (development):
+#   cp .env.dev.example .env
+#   docker compose up -d
+#   docker compose logs -f setup   # wait for "==> Done"
+#
+# Production: start from .env.prod.example instead. See README.md.
+#
+# Required variables have no default: compose refuses to start without them.
+
+name: ${COMPOSE_PROJECT_NAME:-saleor}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: "${LOG_MAX_FILE:-3}"
+
+# The Saleor image, shared by setup, api, worker, beat and console. The
+# entrypoint wrapper (scripts/entrypoint.sh) builds the connection URLs and
+# loads the RSA key before running the command.
+x-saleor: &saleor
+  image: ghcr.io/saleor/saleor:${SALEOR_VERSION:-3.23.36}
+  logging: *logging
+  # The image creates a `saleor` user but runs as root.
+  user: saleor
+  entrypoint: ["sh", "/usr/local/share/stack/scripts/entrypoint.sh"]
+
+x-saleor-env: &saleor-env
+  DEBUG: "False"
+  SALEOR_VERSION: ${SALEOR_VERSION:-3.23.36}
+  SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+  SALEOR_URL: ${SALEOR_URL:?Set SALEOR_URL in .env (e.g. https://shop.example.com)}
+  PUBLIC_URL: ${SALEOR_URL:?Set SALEOR_URL in .env (e.g. https://shop.example.com)}
+  SALEOR_ALLOWED_HOSTS: ${SALEOR_ALLOWED_HOSTS:-}
+  SALEOR_ALLOWED_CLIENT_HOSTS: ${SALEOR_ALLOWED_CLIENT_HOSTS:-}
+  ALLOWED_GRAPHQL_ORIGINS: ${ALLOWED_GRAPHQL_ORIGINS:-*}
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_NAME: ${DB_NAME:-saleor}
+  DB_USER: ${DB_USER:-saleor}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+  CACHE_URL: redis://valkey:6379/0
+  CELERY_BROKER_URL: redis://valkey:6379/1
+  KEYS_DIR: /var/lib/saleor/keys
+  DEFAULT_COUNTRY: ${SALEOR_COUNTRY:-CL}
+  DEFAULT_CHANNEL_SLUG: ${SALEOR_CHANNEL_SLUG:-default-channel}
+  # Locale of amounts in emails (Saleor formats them in English otherwise).
+  SALEOR_EMAIL_LOCALE: ${SALEOR_EMAIL_LOCALE:-es_CL}
+  PLAYGROUND_ENABLED: ${SALEOR_PLAYGROUND:-False}
+  # Webhooks and app calls to private/loopback addresses are refused unless
+  # disabled (e.g. an app on the host in development).
+  HTTP_IP_FILTER_ENABLED: ${HTTP_IP_FILTER_ENABLED:-True}
+  HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS: ${HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS:-False}
+  # Saleor sends usage data to usage-telemetry.saleor.io by default.
+  SEND_USAGE_TELEMETRY: ${SEND_USAGE_TELEMETRY:-False}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_SECURE: ${SMTP_SECURE:-tls}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-noreply@example.com}
+  SMTP_FROM_NAME: ${SMTP_FROM_NAME:-}
+  # Stack settings module (config/saleor): Saleor's settings plus the
+  # `stack` app (setup command, email price format).
+  DJANGO_SETTINGS_MODULE: stack_settings
+  PYTHONPATH: /opt/stack
+  PYTHONDONTWRITEBYTECODE: "1"
+
+x-saleor-volumes: &saleor-volumes
+  - media:/app/media
+  - keys:/var/lib/saleor/keys:ro
+  - ./config/saleor:/opt/stack:ro
+  - ./scripts:/usr/local/share/stack/scripts:ro
+
+services:
+  db:
+    image: postgres:${POSTGRES_VERSION:-15}-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_DB: ${DB_NAME:-saleor}
+      POSTGRES_USER: ${DB_USER:-saleor}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEMORY_LIMIT:-1g}
+
+  # Cache and Celery broker (Redis-compatible).
+  valkey:
+    image: valkey/valkey:${VALKEY_VERSION:-8.1}-alpine
+    restart: unless-stopped
+    logging: *logging
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: ${VALKEY_MEMORY_LIMIT:-256m}
+
+  # One-shot job: RSA key, static files for Caddy, migrations, admin user and
+  # store settings. Safe to repeat; runs on every `up`.
+  setup:
+    <<: *saleor
+    restart: "no"
+    # Root only to own the keys and static volumes; Saleor runs as saleor.
+    user: root
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      <<: *saleor-env
+      SALEOR_ADMIN_EMAIL: ${SALEOR_ADMIN_EMAIL:?Set SALEOR_ADMIN_EMAIL in .env}
+      SALEOR_ADMIN_PASSWORD: ${SALEOR_ADMIN_PASSWORD:?Set SALEOR_ADMIN_PASSWORD in .env}
+      SALEOR_STORE_NAME: ${SALEOR_STORE_NAME:-Saleor}
+      SALEOR_CURRENCY: ${SALEOR_CURRENCY:-CLP}
+      SALEOR_CHANNEL_NAME: ${SALEOR_CHANNEL_NAME:-Tienda}
+      SALEOR_CITY: ${SALEOR_CITY:-Santiago}
+      SALEOR_ZONE_NAME: ${SALEOR_ZONE_NAME:-Chile}
+      SALEOR_TAX_RATE: ${SALEOR_TAX_RATE-19}
+      SALEOR_PRICES_INCLUDE_TAX: ${SALEOR_PRICES_INCLUDE_TAX:-true}
+      SALEOR_ALLOW_UNPAID_ORDERS: ${SALEOR_ALLOW_UNPAID_ORDERS:-true}
+      SALEOR_EMAILS_SPANISH: ${SALEOR_EMAILS_SPANISH:-true}
+    volumes:
+      - media:/app/media
+      - keys:/var/lib/saleor/keys
+      - static:/srv/static
+      - ./config/saleor:/opt/stack:ro
+      - ./scripts:/usr/local/share/stack/scripts:ro
+    command: ["sh", "/usr/local/share/stack/scripts/setup.sh"]
+    deploy:
+      resources:
+        limits:
+          memory: ${SETUP_MEMORY_LIMIT:-1g}
+
+  # GraphQL API (uvicorn, internal port 8000).
+  api:
+    <<: *saleor
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *saleor-env
+      # Only Caddy reaches the API: trust its X-Forwarded-For/-Proto.
+      FORWARDED_ALLOW_IPS: "*"
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+    # Lets Saleor reach services on the host (e.g. an app or webhook receiver
+    # running locally) at http://host.docker.internal:<port>, also on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *saleor-volumes
+    command: ["sh", "-c", "exec uvicorn saleor.asgi:application --host=0.0.0.0 --port=8000 --workers=$${UVICORN_WORKERS} --lifespan=auto --ws=none --no-server-header --no-access-log --timeout-keep-alive=35 --timeout-graceful-shutdown=30 --limit-max-requests=10000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${API_MEMORY_LIMIT:-1g}
+
+  # Celery worker: emails, webhooks, thumbnails, exports, search updates.
+  worker:
+    <<: *saleor
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *saleor-env
+      CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *saleor-volumes
+    command: ["sh", "-c", "exec celery --app=saleor.celeryconf:app worker --loglevel=info --concurrency=$${CELERY_CONCURRENCY}"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q celery /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: ${WORKER_MEMORY_LIMIT:-1g}
+
+  # Celery beat: Saleor's scheduled tasks (expired checkouts and orders,
+  # stock reservations, search vectors, promotions...).
+  beat:
+    <<: *saleor
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *saleor-env
+    volumes: *saleor-volumes
+    command: ["celery", "--app=saleor.celeryconf:app", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q beat /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: ${BEAT_MEMORY_LIMIT:-512m}
+
+  # Dashboard (single-page app on the image's nginx, internal port 80). The
+  # API URL is relative: the same site serves both.
+  dashboard:
+    image: ghcr.io/saleor/saleor-dashboard:${SALEOR_DASHBOARD_VERSION:-3.23.34}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      API_URL: /graphql/
+      APP_MOUNT_URI: /dashboard/
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/dashboard/"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: ${DASHBOARD_MEMORY_LIMIT:-128m}
+
+  caddy:
+    image: caddy:${CADDY_VERSION:-2.11}-alpine
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      api:
+        condition: service_healthy
+      dashboard:
+        condition: service_healthy
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-32M}
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-80}:80"
+      - "${HTTP_BIND:-127.0.0.1}:${HTTPS_PORT:-443}:443"
+      - "${HTTP_BIND:-127.0.0.1}:${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - media:/srv/media:ro
+      - static:/srv/static:ro
+      # TLS certificates and keys (keep them: ACME rate limits).
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/health/"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: ${CADDY_MEMORY_LIMIT:-256m}
+
+  # Saleor's manage.py (profile "tools"), e.g.:
+  #   docker compose run --rm console changepassword admin@example.com
+  console:
+    <<: *saleor
+    profiles: ["tools"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *saleor-env
+    volumes: *saleor-volumes
+    entrypoint: ["sh", "/usr/local/share/stack/scripts/entrypoint.sh", "python", "manage.py"]
+    command: ["help"]
+    deploy:
+      resources:
+        limits:
+          memory: ${CONSOLE_MEMORY_LIMIT:-1g}
+
+  # Optional (profile "backup"): database dump + media + keys every
+  # BACKUP_INTERVAL_HOURS, kept BACKUP_KEEP_DAYS days in the `backups` volume
+  # (overrides/local-dirs.yaml puts them in a local directory instead).
+  backup:
+    image: postgres:${POSTGRES_VERSION:-15}-alpine
+    profiles: ["backup"]
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-saleor}
+      DB_USER: ${DB_USER:-saleor}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+    volumes:
+      # Read-write so `backup.sh restore` can put them back.
+      - media:/data/media
+      - keys:/data/keys
+      - backups:/backups
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: ["bash", "/usr/local/bin/backup.sh"]
+    healthcheck:
+      test: ["CMD", "bash", "/usr/local/bin/backup.sh", "health"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKUP_MEMORY_LIMIT:-512m}
+
+  # Optional (profile "mailpit", development): catches all outgoing mail.
+  # Set SMTP_HOST=mailpit and SMTP_PORT=1025; web UI on MAILPIT_PORT.
+  mailpit:
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31}
+    profiles: ["mailpit"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${MAILPIT_PORT:-8025}:8025"
+
+volumes:
+  db_data:
+  valkey_data:
+  media:
+  keys:
+  static:
+  caddy_data:
+  caddy_config:
+  backups:

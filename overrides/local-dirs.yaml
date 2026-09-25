@@ -1,0 +1,50 @@
+# Keep the stack's data in local directories instead of named volumes, so it
+# is visible from the host (and easy to include in host-level backups).
+#
+# In .env:
+#   COMPOSE_FILE=compose.yaml:overrides/local-dirs.yaml
+#   DATA_DIR=./data        # optional, default ./data (relative to compose.yaml)
+#
+# Only the directories you keep here change; delete the lines you don't need
+# (e.g. keep just `media`, `keys` and `backups`). Existing data in the named
+# volumes is NOT moved: switch before the first `up`, or restore a backup
+# afterwards. `static` holds only files copied from the image (setup copies
+# them again on every run). `setup` gives `media` and `keys` to the image's
+# saleor user (UID 999) on every run, also on Linux. Backup files are
+# root-owned with mode 0600.
+
+x-saleor-dirs: &saleor-dirs
+  - ${DATA_DIR:-./data}/media:/app/media
+  - ${DATA_DIR:-./data}/keys:/var/lib/saleor/keys:ro
+
+services:
+  db:
+    volumes:
+      - ${DATA_DIR:-./data}/db:/var/lib/postgresql/data
+  valkey:
+    volumes:
+      - ${DATA_DIR:-./data}/valkey:/data
+  setup:
+    volumes:
+      - ${DATA_DIR:-./data}/media:/app/media
+      - ${DATA_DIR:-./data}/keys:/var/lib/saleor/keys
+      - ${DATA_DIR:-./data}/static:/srv/static
+  api:
+    volumes: *saleor-dirs
+  worker:
+    volumes: *saleor-dirs
+  beat:
+    volumes: *saleor-dirs
+  console:
+    volumes: *saleor-dirs
+  caddy:
+    volumes:
+      - ${DATA_DIR:-./data}/media:/srv/media:ro
+      - ${DATA_DIR:-./data}/static:/srv/static:ro
+      - ${DATA_DIR:-./data}/caddy/data:/data
+      - ${DATA_DIR:-./data}/caddy/config:/config
+  backup:
+    volumes:
+      - ${DATA_DIR:-./data}/media:/data/media
+      - ${DATA_DIR:-./data}/keys:/data/keys
+      - ${DATA_DIR:-./data}/backups:/backups

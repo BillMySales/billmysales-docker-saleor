@@ -1,0 +1,85 @@
+# Caddy in front of Saleor: TLS, the API, the dashboard, media and static
+# files, and security headers.
+#
+# - /graphql/ and Saleor's other routes → api:8000 (uvicorn)
+# - /dashboard/ → dashboard:80 (the dashboard image's nginx)
+# - /media/ → uploads (media volume), /static/ → the image's static files
+#   (copied by setup): Saleor doesn't serve them in production.
+# - / → the dashboard.
+{
+	# No admin API: config is static, reloads happen by restarting the container.
+	admin off
+
+	servers {
+		# Behind a reverse proxy on a private network, log the real client IP
+		# (X-Forwarded-For) and pass X-Forwarded-Proto on to Saleor.
+		trusted_proxies static private_ranges
+		# Client IP = the right-most untrusted address (can't be spoofed).
+		trusted_proxies_strict
+	}
+}
+
+(saleor) {
+	encode zstd gzip
+
+	request_body {
+		max_size {$UPLOAD_MAX_SIZE}
+	}
+
+	# One directive per header: in a single `header { }` block, Caddy applies
+	# the "?" (set if missing) fields together, only when all are missing.
+	header ?X-Content-Type-Options nosniff
+	header ?X-Frame-Options SAMEORIGIN
+	header ?Referrer-Policy strict-origin-when-cross-origin
+	header -Server
+
+	@api path /graphql/* /thumbnail/* /image/* /plugins/* /.well-known/jwks.json /health/
+	handle @api {
+		# uvicorn takes the client IP from the last X-Forwarded-For entry it
+		# receives; send only the real one.
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-For {client_ip}
+		}
+	}
+
+	handle /dashboard/* {
+		reverse_proxy dashboard:80
+	}
+	handle /dashboard {
+		redir * /dashboard/ 308
+	}
+
+	handle /media/* {
+		root * /srv
+		header Cache-Control "public, max-age=604800"
+		file_server
+	}
+	handle /static/* {
+		root * /srv
+		header Cache-Control "public, max-age=604800"
+		file_server
+	}
+
+	handle / {
+		redir * /dashboard/ 302
+	}
+
+	handle {
+		respond 404
+	}
+}
+
+# Public site. SITE_ADDRESS is ":80" for plain HTTP (local, or behind another
+# proxy) or a domain name, which makes Caddy obtain and renew a certificate
+# automatically ("localhost" uses Caddy's internal CA).
+{$SITE_ADDRESS} {
+	import saleor
+	log {
+		output stdout
+	}
+}
+
+# Internal-only site (port not published) for the container healthcheck.
+:8080 {
+	import saleor
+}
