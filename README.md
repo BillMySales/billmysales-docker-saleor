@@ -54,8 +54,9 @@ Production
 
 ```shell
 cp .env.prod.example .env
-# Fill in SALEOR_URL, SITE_ADDRESS, SECRET_KEY, DB_PASSWORD,
-# SALEOR_ADMIN_EMAIL, SALEOR_ADMIN_PASSWORD and the SMTP_* values.
+# Required: SALEOR_URL, SITE_ADDRESS, SECRET_KEY, DB_PASSWORD,
+# SALEOR_ADMIN_EMAIL, SALEOR_ADMIN_PASSWORD.
+# Recommended: the SMTP_* values (without SMTP_HOST no emails are sent).
 docker compose up -d
 ```
 
@@ -105,15 +106,17 @@ format.
   (channel, warehouse, shipping zone, product type, category).
 - `manage.py stack_setup` (`config/saleor/stack/management/commands`):
   - the admin user (a superuser: `SALEOR_ADMIN_EMAIL`,
-    `SALEOR_ADMIN_PASSWORD`), if missing;
+    `SALEOR_ADMIN_PASSWORD`), if no user with that email exists (changing
+    the email later adds another one);
   - once (then kept as edited in the dashboard): the defaults adapted to the
     store (channel "Tienda" in CLP for Chile, unpaid orders allowed, warehouse
     "Bodega" in Santiago, shipping zone Chile with a free "Despacho" method,
     IVA 19% flat rate with prices including tax, product type "Producto" and
     category "General"), the admin as recipient of new order emails, and
     Spanish email templates and subjects;
-  - every run: the site's domain from `SALEOR_URL`, the email plugins on or
-    off (`SMTP_HOST`) and their sender (`SMTP_FROM`, `SMTP_FROM_NAME`).
+  - every run: the site's domain from `SALEOR_URL`, the email plugins of the
+    `SALEOR_CHANNEL_SLUG` channel on or off (`SMTP_HOST`) and their sender
+    (`SMTP_FROM`, `SMTP_FROM_NAME`).
 - Copies the image's static files for Caddy.
 
 Common commands
@@ -264,10 +267,13 @@ Every variable is documented in `.env.prod.example`. Main groups:
   `SALEOR_ALLOWED_CLIENT_HOSTS`, `ALLOWED_GRAPHQL_ORIGINS`, `SALEOR_PLAYGROUND`.
 - **Credentials**: `SECRET_KEY`, `DB_PASSWORD`, `SALEOR_ADMIN_EMAIL`,
   `SALEOR_ADMIN_PASSWORD` (required).
-- **Store** (first install only): `SALEOR_STORE_NAME`, `SALEOR_CHANNEL_*`,
-  `SALEOR_CURRENCY`, `SALEOR_COUNTRY`, `SALEOR_CITY`, `SALEOR_ZONE_NAME`,
+- **Store** (first install only): `SALEOR_STORE_NAME`, `SALEOR_CHANNEL_NAME`,
+  `SALEOR_CURRENCY`, `SALEOR_CITY`, `SALEOR_ZONE_NAME`,
   `SALEOR_TAX_RATE`, `SALEOR_PRICES_INCLUDE_TAX`,
-  `SALEOR_ALLOW_UNPAID_ORDERS`, `SALEOR_EMAILS_SPANISH`, `SALEOR_EMAIL_LOCALE`.
+  `SALEOR_ALLOW_UNPAID_ORDERS`, `SALEOR_EMAILS_SPANISH`.
+- **Store** (read on every start or run): `SALEOR_COUNTRY` (also Saleor's
+  default country), `SALEOR_CHANNEL_SLUG` (the channel whose email plugins
+  `setup` configures), `SALEOR_EMAIL_LOCALE` (amounts in emails).
 - **Webhooks**: `HTTP_IP_FILTER_ENABLED`, `HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS`.
 - **Versions**: `SALEOR_VERSION`, `SALEOR_DASHBOARD_VERSION`,
   `POSTGRES_VERSION`, `VALKEY_VERSION`, `CADDY_VERSION`, ...
