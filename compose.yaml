@@ -76,6 +76,13 @@ x-saleor-volumes: &saleor-volumes
   - ./config/saleor:/opt/stack:ro
   - ./scripts:/usr/local/share/stack/scripts:ro
 
+# Lets Saleor reach services on the host (e.g. an app or webhook receiver
+# running locally) at http://host.docker.internal:<port>, also on Linux.
+# Every container that runs the platform's code: its web process, setup,
+# cron, workers, the console (Docker Desktop resolves it anyway).
+x-host-access: &host-access
+  - "host.docker.internal:host-gateway"
+
 services:
   db:
     image: postgres:${POSTGRES_VERSION:-15}-alpine
@@ -141,6 +148,7 @@ services:
       SALEOR_PRICES_INCLUDE_TAX: ${SALEOR_PRICES_INCLUDE_TAX:-true}
       SALEOR_ALLOW_UNPAID_ORDERS: ${SALEOR_ALLOW_UNPAID_ORDERS:-true}
       SALEOR_EMAILS_SPANISH: ${SALEOR_EMAILS_SPANISH:-true}
+    extra_hosts: *host-access
     volumes:
       - media:/app/media
       - keys:/var/lib/saleor/keys
@@ -165,10 +173,7 @@ services:
       # Only Caddy reaches the API: trust its X-Forwarded-For/-Proto.
       FORWARDED_ALLOW_IPS: "*"
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
-    # Lets Saleor reach services on the host (e.g. an app or webhook receiver
-    # running locally) at http://host.docker.internal:<port>, also on Linux.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    extra_hosts: *host-access
     volumes: *saleor-volumes
     command: ["sh", "-c", "exec uvicorn saleor.asgi:application --host=0.0.0.0 --port=8000 --workers=$${UVICORN_WORKERS} --lifespan=auto --ws=none --no-server-header --no-access-log --timeout-keep-alive=35 --timeout-graceful-shutdown=30 --limit-max-requests=10000"]
     healthcheck:
@@ -192,8 +197,7 @@ services:
     environment:
       <<: *saleor-env
       CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    extra_hosts: *host-access
     volumes: *saleor-volumes
     command: ["sh", "-c", "exec celery --app=saleor.celeryconf:app worker --loglevel=info --concurrency=$${CELERY_CONCURRENCY}"]
     healthcheck:
@@ -216,6 +220,7 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *saleor-env
+    extra_hosts: *host-access
     volumes: *saleor-volumes
     command: ["celery", "--app=saleor.celeryconf:app", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
     healthcheck:
@@ -291,6 +296,7 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *saleor-env
+    extra_hosts: *host-access
     volumes: *saleor-volumes
     entrypoint: ["sh", "/usr/local/share/stack/scripts/entrypoint.sh", "python", "manage.py"]
     command: ["help"]
